@@ -6,6 +6,7 @@ import os
 import winreg
 import tempfile
 import shutil
+import json
 
 
 class MiniPDF:
@@ -21,11 +22,13 @@ class MiniPDF:
         self.selected_font = None
         self.page_images = {}
         self.system_fonts = self._load_system_fonts()
-        self._drag_origin = None   # (cx, cy) 드래그 시작점
-        self._selection = None     # (cx0, cy0, cx1, cy1) 캔버스 좌표 선택 영역
+        self._drag_origin = None
+        self._selection = None
+        self._config_path = os.path.join(os.environ.get("APPDATA", ""), "mini-pdf", "config.json")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
+        self._load_config()
 
     def _build_ui(self):
         # 툴바
@@ -181,7 +184,28 @@ class MiniPDF:
                     fonts[name] = os.path.join(d, f)
         return dict(sorted(fonts.items(), key=lambda x: x[0].lower()))
 
+    def _load_config(self):
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            font_path = cfg.get("font")
+            if font_path and os.path.exists(font_path):
+                self.selected_font = font_path
+                name = os.path.splitext(os.path.basename(font_path))[0]
+                self.font_label.config(text=f"폰트: {name}", fg="black")
+        except Exception:
+            pass
+
+    def _save_config(self):
+        try:
+            os.makedirs(os.path.dirname(self._config_path), exist_ok=True)
+            with open(self._config_path, "w", encoding="utf-8") as f:
+                json.dump({"font": self.selected_font}, f)
+        except Exception:
+            pass
+
     def _on_close(self):
+        self._save_config()
         self.root.destroy()
 
     def choose_font(self):
@@ -192,6 +216,7 @@ class MiniPDF:
             name = os.path.splitext(os.path.basename(dialog.result))[0]
             self.font_label.config(text=f"폰트: {name}", fg="black")
             self.status.config(text=f"폰트 설정: {dialog.result}")
+            self._save_config()
 
     # ── 드래그 선택 ────────────────────────────────────
     def _drag_start(self, event):
