@@ -4,6 +4,8 @@ import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 import os
 import winreg
+import tempfile
+import shutil
 
 
 class MiniPDF:
@@ -91,8 +93,7 @@ class MiniPDF:
         if not self.current_path:
             self.save_pdf_as()
             return
-        self.doc.save(self.current_path, garbage=4, deflate=True, incremental=False)
-        self.status.config(text=f"저장됨: {self.current_path}")
+        self._save_to(self.current_path)
 
     def save_pdf_as(self):
         if not self.doc:
@@ -100,10 +101,26 @@ class MiniPDF:
         path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
         if not path:
             return
-        self.doc.save(path, garbage=4, deflate=True)
-        self.current_path = path
-        self.root.title(f"mini-pdf — {os.path.basename(path)}")
-        self.status.config(text=f"저장됨: {path}")
+        self._save_to(path)
+
+    def _save_to(self, path):
+        """임시 파일에 저장 후 대상 경로로 교체 — 열린 파일에 덮어쓰기 가능."""
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+        os.close(tmp_fd)
+        try:
+            self.doc.save(tmp_path, garbage=4, deflate=True)
+            self.doc.close()
+            shutil.move(tmp_path, path)
+            self.doc = fitz.open(path)
+            self.current_path = path
+            self.page_images.clear()
+            self.render_page()
+            self.root.title(f"mini-pdf — {os.path.basename(path)}")
+            self.status.config(text=f"저장됨: {path}")
+        except Exception as e:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            messagebox.showerror("저장 오류", str(e))
 
     # ── 렌더링 ─────────────────────────────────────────
     def render_page(self):
