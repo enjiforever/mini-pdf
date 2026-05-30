@@ -234,8 +234,9 @@ class MiniPDF:
         self.canvas.delete("selection")
         self.canvas.create_rectangle(
             x0, y0, x1, y1,
-            outline="#1a7fd4", width=2, dash=(4, 2),
-            fill="#1a7fd430", tags="selection"
+            outline="#1a7fd4", width=2,
+            fill="#1a7fd4", stipple="gray25",
+            tags="selection"
         )
 
     def _drag_end(self, event):
