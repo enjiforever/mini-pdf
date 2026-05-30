@@ -281,12 +281,28 @@ class MiniPDF:
         rect = self._canvas_to_pdf_rect(*self._selection)
         orig_text = page.get_text("text", clip=rect).strip()
 
-        dialog = ReplaceDialog(self.root, orig_text)
+        # 원본 폰트 크기 감지
+        detected_size = 11.0
+        try:
+            blocks = page.get_text("dict", clip=rect)["blocks"]
+            sizes = [
+                span["size"]
+                for b in blocks if b.get("type") == 0
+                for line in b["lines"]
+                for span in line["spans"]
+                if span["text"].strip()
+            ]
+            if sizes:
+                detected_size = round(sum(sizes) / len(sizes), 1)
+        except Exception:
+            pass
+
+        dialog = ReplaceDialog(self.root, orig_text, detected_size)
         self.root.wait_window(dialog.top)
         if not dialog.result:
             return
 
-        new_text, font_size = dialog.result
+        new_text, font_size, line_height, align = dialog.result
 
         try:
             # redact으로 원본 텍스트 스트림에서 물리적 제거
@@ -305,7 +321,8 @@ class MiniPDF:
                 fontsize=font_size,
                 fontname=fontname,
                 color=(0, 0, 0),
-                align=0,
+                align=align,
+                lineheight=line_height,
             )
             if rc < 0:
                 self.status.config(text="경고: 텍스트가 영역을 벗어났습니다. 폰트 크기를 줄여보세요.")
@@ -407,7 +424,9 @@ class FontPickerDialog:
 
 
 class ReplaceDialog:
-    def __init__(self, parent, orig_text):
+    ALIGN_OPTIONS = [("왼쪽", 0), ("가운데", 1), ("오른쪽", 2), ("양쪽", 3)]
+
+    def __init__(self, parent, orig_text, detected_size=11.0):
         self.result = None
         self.top = tk.Toplevel(parent)
         self.top.title("텍스트 교체")
@@ -423,11 +442,30 @@ class ReplaceDialog:
         self.new_text = tk.Text(self.top, height=4, width=60)
         self.new_text.pack(padx=10, pady=4)
 
-        size_frame = tk.Frame(self.top)
-        size_frame.pack(fill=tk.X, padx=10, pady=4)
-        tk.Label(size_frame, text="폰트 크기:").pack(side=tk.LEFT)
-        self.font_size = tk.Spinbox(size_frame, from_=6, to=72, value=11, width=5)
-        self.font_size.pack(side=tk.LEFT, padx=4)
+        opts = tk.Frame(self.top)
+        opts.pack(fill=tk.X, padx=10, pady=4)
+
+        # 폰트 크기 (원본 감지값 기본)
+        tk.Label(opts, text="폰트 크기:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        self.font_size = tk.Spinbox(opts, from_=6, to=72, width=5, format="%.1f", increment=0.5)
+        self.font_size.delete(0, tk.END)
+        self.font_size.insert(0, str(detected_size))
+        self.font_size.grid(row=0, column=1, sticky=tk.W, padx=(0, 16))
+
+        # 행간
+        tk.Label(opts, text="행간:").grid(row=0, column=2, sticky=tk.W, padx=(0, 4))
+        self.line_height = tk.Spinbox(opts, from_=1.0, to=3.0, width=5, format="%.1f", increment=0.1)
+        self.line_height.delete(0, tk.END)
+        self.line_height.insert(0, "1.4")
+        self.line_height.grid(row=0, column=3, sticky=tk.W, padx=(0, 16))
+
+        # 정렬
+        tk.Label(opts, text="정렬:").grid(row=0, column=4, sticky=tk.W, padx=(0, 4))
+        self.align_var = tk.IntVar(value=3)
+        for label, val in self.ALIGN_OPTIONS:
+            tk.Radiobutton(opts, text=label, variable=self.align_var, value=val).grid(
+                row=0, column=5 + val, sticky=tk.W
+            )
 
         btn_frame = tk.Frame(self.top)
         btn_frame.pack(pady=8)
@@ -440,8 +478,12 @@ class ReplaceDialog:
             size = float(self.font_size.get())
         except ValueError:
             size = 11.0
+        try:
+            lh = float(self.line_height.get())
+        except ValueError:
+            lh = 1.4
         if text:
-            self.result = (text, size)
+            self.result = (text, size, lh, self.align_var.get())
         self.top.destroy()
 
 
