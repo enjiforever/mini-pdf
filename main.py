@@ -3,6 +3,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 import os
+import winreg
 
 
 class MiniPDF:
@@ -12,10 +13,12 @@ class MiniPDF:
         self.root.geometry("1200x800")
 
         self.doc = None
+        self.current_path = None
         self.current_page = 0
         self.zoom = 1.5
         self.selected_font = None
         self.page_images = {}
+        self.system_fonts = self._load_system_fonts()
 
         self._build_ui()
 
@@ -26,6 +29,7 @@ class MiniPDF:
 
         tk.Button(toolbar, text="열기", command=self.open_pdf).pack(side=tk.LEFT, padx=2, pady=2)
         tk.Button(toolbar, text="저장", command=self.save_pdf).pack(side=tk.LEFT, padx=2, pady=2)
+        tk.Button(toolbar, text="다른 이름으로 저장", command=self.save_pdf_as).pack(side=tk.LEFT, padx=2, pady=2)
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
         tk.Button(toolbar, text="텍스트 교체", command=self.replace_text_mode).pack(side=tk.LEFT, padx=2, pady=2)
         tk.Button(toolbar, text="이미지 삽입", command=self.insert_image).pack(side=tk.LEFT, padx=2, pady=2)
@@ -73,6 +77,7 @@ class MiniPDF:
         if not path:
             return
         self.doc = fitz.open(path)
+        self.current_path = path
         self.current_page = 0
         self.page_images.clear()
         self.render_page()
@@ -82,10 +87,21 @@ class MiniPDF:
     def save_pdf(self):
         if not self.doc:
             return
+        if not self.current_path:
+            self.save_pdf_as()
+            return
+        self.doc.save(self.current_path, garbage=4, deflate=True, incremental=False)
+        self.status.config(text=f"저장됨: {self.current_path}")
+
+    def save_pdf_as(self):
+        if not self.doc:
+            return
         path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
         if not path:
             return
         self.doc.save(path, garbage=4, deflate=True)
+        self.current_path = path
+        self.root.title(f"mini-pdf — {os.path.basename(path)}")
         self.status.config(text=f"저장됨: {path}")
 
     # ── 렌더링 ─────────────────────────────────────────
@@ -128,16 +144,29 @@ class MiniPDF:
         self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
     # ── 폰트 ──────────────────────────────────────────
+    def _load_system_fonts(self):
+        fonts = {}
+        font_dirs = [
+            r"C:\Windows\Fonts",
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Microsoft\Windows\Fonts"),
+        ]
+        for d in font_dirs:
+            if not os.path.isdir(d):
+                continue
+            for f in os.listdir(d):
+                if f.lower().endswith((".ttf", ".otf")):
+                    name = os.path.splitext(f)[0]
+                    fonts[name] = os.path.join(d, f)
+        return dict(sorted(fonts.items(), key=lambda x: x[0].lower()))
+
     def choose_font(self):
-        path = filedialog.askopenfilename(
-            title="한글 폰트 선택",
-            filetypes=[("Font files", "*.ttf *.otf"), ("All files", "*.*")]
-        )
-        if path:
-            self.selected_font = path
-            name = os.path.basename(path)
+        dialog = FontPickerDialog(self.root, self.system_fonts)
+        self.root.wait_window(dialog.top)
+        if dialog.result:
+            self.selected_font = dialog.result
+            name = os.path.splitext(os.path.basename(dialog.result))[0]
             self.font_label.config(text=f"폰트: {name}", fg="black")
-            self.status.config(text=f"폰트 설정: {path}")
+            self.status.config(text=f"폰트 설정: {dialog.result}")
 
     # ── 텍스트 교체 ────────────────────────────────────
     def replace_text_mode(self):
@@ -238,6 +267,63 @@ class MiniPDF:
 
 
 # ── 다이얼로그 ──────────────────────────────────────────
+
+class FontPickerDialog:
+    def __init__(self, parent, system_fonts):
+        self.result = None
+        self.system_fonts = system_fonts
+
+        self.top = tk.Toplevel(parent)
+        self.top.title("폰트 선택")
+        self.top.geometry("400x500")
+        self.top.grab_set()
+
+        # 검색창
+        search_frame = tk.Frame(self.top)
+        search_frame.pack(fill=tk.X, padx=10, pady=8)
+        tk.Label(search_frame, text="검색:").pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        self.search_var.trace("w", self._filter)
+        tk.Entry(search_frame, textvariable=self.search_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+        # 리스트
+        list_frame = tk.Frame(self.top)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10)
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, selectmode=tk.SINGLE, font=("", 10))
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.listbox.yview)
+        self.listbox.bind("<Double-Button-1>", lambda e: self._ok())
+
+        self._all_names = list(system_fonts.keys())
+        self._populate(self._all_names)
+
+        btn_frame = tk.Frame(self.top)
+        btn_frame.pack(pady=8)
+        tk.Button(btn_frame, text="선택", command=self._ok, width=10).pack(side=tk.LEFT, padx=4)
+        tk.Button(btn_frame, text="취소", command=self.top.destroy, width=10).pack(side=tk.LEFT, padx=4)
+
+    def _populate(self, names):
+        self.listbox.delete(0, tk.END)
+        for name in names:
+            self.listbox.insert(tk.END, name)
+
+    def _filter(self, *_):
+        q = self.search_var.get().lower()
+        filtered = [n for n in self._all_names if q in n.lower()]
+        self._populate(filtered)
+
+    def _ok(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        q = self.search_var.get().lower()
+        visible = [n for n in self._all_names if q in n.lower()]
+        name = visible[sel[0]]
+        self.result = self.system_fonts[name]
+        self.top.destroy()
+
 
 class ReplaceDialog:
     def __init__(self, parent, orig_text):
