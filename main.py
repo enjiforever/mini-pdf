@@ -217,22 +217,27 @@ class MiniPDF:
         rect = fitz.Rect(x0, y0, x1, y1)
         page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
 
-        # 새 텍스트 삽입
-        font_args = {}
+        # 폰트 등록 후 텍스트 삽입
         if self.selected_font:
-            font_args["fontfile"] = self.selected_font
-            font_args["fontname"] = "custom"
+            try:
+                fontname = f"F{self.current_page}_{id(rect)}"[:16]
+                page.insert_font(fontname=fontname, fontfile=self.selected_font)
+            except Exception as e:
+                messagebox.showerror("폰트 오류", f"폰트 등록 실패:\n{e}\n\n기본 폰트로 대체합니다.")
+                fontname = "helv"
         else:
-            font_args["fontname"] = "helv"
+            fontname = "helv"
 
-        page.insert_textbox(
+        rc = page.insert_textbox(
             rect,
             new_text,
             fontsize=font_size,
+            fontname=fontname,
             color=(0, 0, 0),
             align=0,
-            **font_args,
         )
+        if rc < 0:
+            self.status.config(text=f"경고: 텍스트가 영역을 벗어났습니다 (rc={rc}). 폰트 크기를 줄여보세요.")
 
         self._mode = None
         self.page_images.clear()
