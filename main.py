@@ -22,8 +22,9 @@ class MiniPDF:
         self.selected_font = None
         self.page_images = {}
         self.system_fonts = self._load_system_fonts()
-        self._selected_pdf_rect = None   # fitz.Rect, PDF 좌표
-        self._detected_color = (0, 0, 0)  # RGB float tuple
+        self._selected_pdf_rect = None
+        self._detected_color = (0, 0, 0)
+        self._drag_origin = None
         self._config_path = os.path.join(os.environ.get("APPDATA", ""), "mini-pdf", "config.json")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -72,7 +73,9 @@ class MiniPDF:
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         hscroll.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self.canvas.bind("<Button-1>", self._click_select)
+        self.canvas.bind("<Button-1>", self._drag_start)
+        self.canvas.bind("<B1-Motion>", self._drag_move)
+        self.canvas.bind("<ButtonRelease-1>", self._drag_end)
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
 
         # 상태바
@@ -216,37 +219,86 @@ class MiniPDF:
             self.status.config(text=f"폰트 설정: {dialog.result}")
             self._save_config()
 
-    # ── 클릭으로 텍스트 블록 선택 ──────────────────────
-    def _click_select(self, event):
+    # ── 드래그로 텍스트 블록 범위 선택 ────────────────
+    def _drag_start(self, event):
         if not self.doc:
             return
-        px = (event.x - 10) / self.zoom
-        py = (event.y - 10) / self.zoom
-        page = self.doc[self.current_page]
+        self._drag_origin = (event.x, event.y)
+        self._selected_pdf_rect = None
+        self.canvas.delete("selection")
 
-        # 클릭 위치의 텍스트 블록 탐색
-        data = page.get_text("dict")
-        target = None
-        for block in data["blocks"]:
+    def _drag_move(self, event):
+        if not self._drag_origin:
+            return
+        x0, y0 = self._drag_origin
+        self.canvas.delete("selection")
+        self.canvas.create_rectangle(
+            x0, y0, event.x, event.y,
+            outline="#1a7fd4", width=2,
+            fill="#1a7fd4", stipple="gray25",
+            tags="selection"
+        )
+
+    def _drag_end(self, event):
+        if not self._drag_origin:
+            return
+        x0, y0 = self._drag_origin
+        x1, y1 = event.x, event.y
+        self._drag_origin = None
+
+        # 너무 작은 드래그는 단순 클릭으로 처리
+        if abs(x1 - x0) < 5 and abs(y1 - y0) < 5:
+            self._click_block(x0, y0)
+            return
+
+        # 드래그 영역 PDF 좌표 변환
+        def c2p(v): return (v - 10) / self.zoom
+        drag_rect = fitz.Rect(
+            min(c2p(x0), c2p(x1)), min(c2p(y0), c2p(y1)),
+            max(c2p(x0), c2p(x1)), max(c2p(y0), c2p(y1)),
+        )
+        self._apply_block_selection(drag_rect)
+
+    def _click_block(self, cx, cy):
+        """단순 클릭 시 해당 텍스트 블록 하나 선택."""
+        px = (cx - 10) / self.zoom
+        py = (cy - 10) / self.zoom
+        page = self.doc[self.current_page]
+        for block in page.get_text("dict")["blocks"]:
             if block.get("type") != 0:
                 continue
             bx0, by0, bx1, by1 = block["bbox"]
             if bx0 <= px <= bx1 and by0 <= py <= by1:
-                target = block
-                break
+                self._apply_block_selection(fitz.Rect(block["bbox"]))
+                return
+        self.canvas.delete("selection")
+        self._selected_pdf_rect = None
+        self.status.config(text="텍스트 블록을 찾지 못했습니다.")
+
+    def _apply_block_selection(self, drag_rect):
+        """drag_rect와 겹치는 모든 텍스트 블록을 합쳐 선택 영역 확정."""
+        page = self.doc[self.current_page]
+        matched = [
+            block for block in page.get_text("dict")["blocks"]
+            if block.get("type") == 0
+            and fitz.Rect(block["bbox"]).intersects(drag_rect)
+        ]
 
         self.canvas.delete("selection")
-        if not target:
+        if not matched:
             self._selected_pdf_rect = None
-            self.status.config(text="텍스트 블록을 찾지 못했습니다.")
+            self.status.config(text="선택 영역에 텍스트가 없습니다.")
             return
 
-        # PDF 블록 rect 저장
-        self._selected_pdf_rect = fitz.Rect(target["bbox"])
+        # 모든 매칭 블록의 union rect
+        union = fitz.Rect(matched[0]["bbox"])
+        for b in matched[1:]:
+            union |= fitz.Rect(b["bbox"])
+        self._selected_pdf_rect = union
 
-        # 텍스트 색상 감지 (첫 번째 span 기준)
+        # 색상 감지 (첫 번째 span)
         try:
-            color_int = target["lines"][0]["spans"][0].get("color", 0)
+            color_int = matched[0]["lines"][0]["spans"][0].get("color", 0)
             self._detected_color = (
                 ((color_int >> 16) & 0xFF) / 255,
                 ((color_int >> 8) & 0xFF) / 255,
@@ -255,12 +307,11 @@ class MiniPDF:
         except Exception:
             self._detected_color = (0, 0, 0)
 
-        # 캔버스에 블록 경계 하이라이트
-        bx0, by0, bx1, by1 = target["bbox"]
-        cx0 = bx0 * self.zoom + 10
-        cy0 = by0 * self.zoom + 10
-        cx1 = bx1 * self.zoom + 10
-        cy1 = by1 * self.zoom + 10
+        # 캔버스에 최종 선택 영역 표시
+        cx0 = union.x0 * self.zoom + 10
+        cy0 = union.y0 * self.zoom + 10
+        cx1 = union.x1 * self.zoom + 10
+        cy1 = union.y1 * self.zoom + 10
         self.canvas.create_rectangle(
             cx0, cy0, cx1, cy1,
             outline="#1a7fd4", width=2,
@@ -268,10 +319,10 @@ class MiniPDF:
             tags="selection"
         )
 
-        # 상태바 미리보기
         text = "".join(
             span["text"]
-            for line in target["lines"]
+            for b in matched
+            for line in b["lines"]
             for span in line["spans"]
         ).strip()
         preview = text[:60].replace("\n", " ") + ("…" if len(text) > 60 else "")
