@@ -288,10 +288,11 @@ class MiniPDF:
 
         new_text, font_size = dialog.result
 
-        # 원본 텍스트 가리기
-        page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
-
         try:
+            # redact으로 원본 텍스트 스트림에서 물리적 제거
+            page.add_redact_annot(rect, fill=(1, 1, 1))
+            page.apply_redacts(images=fitz.PDF_REDACT_IMAGE_NONE)
+
             if self.selected_font:
                 fontname = f"F{page.number}_{abs(hash(str(rect)))}"[:16]
                 page.insert_font(fontname=fontname, fontfile=self.selected_font)
