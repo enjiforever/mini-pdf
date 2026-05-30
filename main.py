@@ -155,7 +155,7 @@ class MiniPDF:
             if not os.path.isdir(d):
                 continue
             for f in os.listdir(d):
-                if f.lower().endswith((".ttf", ".otf")):
+                if f.lower().endswith(".ttf"):
                     name = os.path.splitext(f)[0]
                     fonts[name] = os.path.join(d, f)
         return dict(sorted(fonts.items(), key=lambda x: x[0].lower()))
