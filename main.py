@@ -221,23 +221,23 @@ class MiniPDF:
         rect = fitz.Rect(x0, y0, x1, y1)
         page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
 
-        # fitz.Font 객체로 직접 임베딩 — 저장 시 PDF에 완전히 포함됨
         try:
             if self.selected_font:
-                font = fitz.Font(fontfile=self.selected_font)
+                fontname = f"F{page.number}_{abs(hash(rect))}"[:16]
+                page.insert_font(fontname=fontname, fontfile=self.selected_font)
             else:
-                font = fitz.Font("helv")
+                fontname = "helv"
 
             rc = page.insert_textbox(
                 rect,
                 new_text,
                 fontsize=font_size,
-                font=font,
+                fontname=fontname,
                 color=(0, 0, 0),
                 align=0,
             )
             if rc < 0:
-                self.status.config(text=f"경고: 텍스트가 영역을 벗어났습니다. 폰트 크기를 줄여보세요.")
+                self.status.config(text="경고: 텍스트가 영역을 벗어났습니다. 폰트 크기를 줄여보세요.")
         except Exception as e:
             messagebox.showerror("텍스트 삽입 오류", str(e))
             return
