@@ -4,13 +4,6 @@ import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 import os
 import winreg
-import tempfile
-import shutil
-import io
-import textwrap
-from reportlab.pdfgen import canvas as rl_canvas
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
 
 class MiniPDF:
@@ -26,7 +19,6 @@ class MiniPDF:
         self.selected_font = None
         self.page_images = {}
         self.system_fonts = self._load_system_fonts()
-        self._registered_fonts = {}  # font_path → reportlab font name
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
@@ -168,56 +160,8 @@ class MiniPDF:
                     fonts[name] = os.path.join(d, f)
         return dict(sorted(fonts.items(), key=lambda x: x[0].lower()))
 
-    def _get_rl_fontname(self, font_path):
-        """reportlab에 폰트를 등록하고 이름을 반환. 이미 등록된 경우 캐시 사용."""
-        if font_path in self._registered_fonts:
-            return self._registered_fonts[font_path]
-        name = f"KorFont{len(self._registered_fonts)}"
-        pdfmetrics.registerFont(TTFont(name, font_path))
-        self._registered_fonts[font_path] = name
-        return name
-
     def _on_close(self):
         self.root.destroy()
-
-    def _overlay_text(self, page, rect, text, font_size):
-        """reportlab으로 텍스트 PDF를 만들고 PyMuPDF로 페이지에 오버레이."""
-        pw = page.rect.width
-        ph = page.rect.height
-
-        buf = io.BytesIO()
-        c = rl_canvas.Canvas(buf, pagesize=(pw, ph))
-
-        if self.selected_font:
-            rl_name = self._get_rl_fontname(self.selected_font)
-        else:
-            rl_name = "Helvetica"
-
-        c.setFont(rl_name, font_size)
-        c.setFillColorRGB(0, 0, 0)
-
-        # reportlab 좌표계는 좌하단 원점 → PyMuPDF 좌상단 원점 변환
-        box_w = rect.x1 - rect.x0
-        box_h = rect.y1 - rect.y0
-        line_height = font_size * 1.2
-        chars_per_line = max(1, int(box_w / (font_size * 0.6)))
-        lines = []
-        for para in text.splitlines():
-            lines.extend(textwrap.wrap(para, width=chars_per_line) or [""])
-
-        rl_y = ph - rect.y0 - font_size  # 첫 줄 베이스라인
-        for line in lines:
-            if rl_y < (ph - rect.y1):
-                break
-            c.drawString(rect.x0, rl_y, line)
-            rl_y -= line_height
-
-        c.save()
-
-        buf.seek(0)
-        overlay_doc = fitz.open("pdf", buf.read())
-        page.show_pdf_page(page.rect, overlay_doc, 0, overlay=True)
-        overlay_doc.close()
 
     def choose_font(self):
         dialog = FontPickerDialog(self.root, self.system_fonts)
@@ -277,9 +221,23 @@ class MiniPDF:
         rect = fitz.Rect(x0, y0, x1, y1)
         page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
 
-        # reportlab으로 텍스트 레이어 생성 후 PyMuPDF로 오버레이
+        # fitz.Font 객체로 직접 임베딩 — 저장 시 PDF에 완전히 포함됨
         try:
-            self._overlay_text(page, rect, new_text, font_size)
+            if self.selected_font:
+                font = fitz.Font(fontfile=self.selected_font)
+            else:
+                font = fitz.Font("helv")
+
+            rc = page.insert_textbox(
+                rect,
+                new_text,
+                fontsize=font_size,
+                font=font,
+                color=(0, 0, 0),
+                align=0,
+            )
+            if rc < 0:
+                self.status.config(text=f"경고: 텍스트가 영역을 벗어났습니다. 폰트 크기를 줄여보세요.")
         except Exception as e:
             messagebox.showerror("텍스트 삽입 오류", str(e))
             return
