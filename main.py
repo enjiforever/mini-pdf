@@ -4,6 +4,8 @@ import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 import os
 import winreg
+import tempfile
+import shutil
 
 
 class MiniPDF:
@@ -19,6 +21,9 @@ class MiniPDF:
         self.selected_font = None
         self.page_images = {}
         self.system_fonts = self._load_system_fonts()
+        self._font_cache_dir = tempfile.mkdtemp(prefix="minipdf_fonts_")
+        self._converted_fonts = {}  # otf path → converted ttf path
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
 
@@ -159,6 +164,46 @@ class MiniPDF:
                     fonts[name] = os.path.join(d, f)
         return dict(sorted(fonts.items(), key=lambda x: x[0].lower()))
 
+    def _resolve_font(self, font_path):
+        """OTF(CFF) 폰트를 TTF로 변환해 캐시된 경로를 반환. TTF면 그대로 반환."""
+        if font_path in self._converted_fonts:
+            return self._converted_fonts[font_path]
+
+        # 파일 헤더로 포맷 확인 (OTTO = CFF 기반 OTF)
+        with open(font_path, "rb") as f:
+            magic = f.read(4)
+
+        if magic != b"OTTO":
+            return font_path  # TTF 계열 — 변환 불필요
+
+        # OTF → TTF 변환
+        try:
+            from fontTools.ttLib import TTFont as FTFont
+            from fontTools.pens.t2Pen import T2Pen
+            from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+            self.status.config(text=f"OTF 폰트 변환 중... (처음 한 번만)")
+            self.root.update()
+
+            ft = FTFont(font_path)
+            # CFF → glyf 테이블 변환
+            from fontTools.cu2qu.ufo import font_to_quadratic
+            from fontTools import cu2qu
+            cu2qu.fonts_to_quadratic([ft], reverse_direction=True)
+
+            out_path = os.path.join(self._font_cache_dir, os.path.basename(font_path).replace(".otf", ".ttf").replace(".OTF", ".ttf"))
+            ft.save(out_path)
+            self._converted_fonts[font_path] = out_path
+            self.status.config(text=f"폰트 변환 완료: {os.path.basename(out_path)}")
+            return out_path
+        except Exception as e:
+            messagebox.showerror("폰트 변환 실패", f"OTF→TTF 변환 중 오류:\n{e}\n\n다른 폰트를 선택해주세요.")
+            return None
+
+    def _on_close(self):
+        shutil.rmtree(self._font_cache_dir, ignore_errors=True)
+        self.root.destroy()
+
     def choose_font(self):
         dialog = FontPickerDialog(self.root, self.system_fonts)
         self.root.wait_window(dialog.top)
@@ -219,11 +264,15 @@ class MiniPDF:
 
         # 폰트 등록 후 텍스트 삽입
         if self.selected_font:
-            try:
-                fontname = f"F{self.current_page}_{id(rect)}"[:16]
-                page.insert_font(fontname=fontname, fontfile=self.selected_font)
-            except Exception as e:
-                messagebox.showerror("폰트 오류", f"폰트 등록 실패:\n{e}\n\n기본 폰트로 대체합니다.")
+            font_path = self._resolve_font(self.selected_font)
+            if font_path:
+                try:
+                    fontname = f"F{self.current_page}_{id(rect)}"[:16]
+                    page.insert_font(fontname=fontname, fontfile=font_path)
+                except Exception as e:
+                    messagebox.showerror("폰트 오류", f"폰트 등록 실패:\n{e}\n\n기본 폰트로 대체합니다.")
+                    fontname = "helv"
+            else:
                 fontname = "helv"
         else:
             fontname = "helv"
