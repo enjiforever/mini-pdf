@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox, simpledialog, colorchooser
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 import os
@@ -22,8 +22,8 @@ class MiniPDF:
         self.selected_font = None
         self.page_images = {}
         self.system_fonts = self._load_system_fonts()
-        self._drag_origin = None
-        self._selection = None
+        self._selected_pdf_rect = None   # fitz.Rect, PDF 좌표
+        self._detected_color = (0, 0, 0)  # RGB float tuple
         self._config_path = os.path.join(os.environ.get("APPDATA", ""), "mini-pdf", "config.json")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -72,9 +72,7 @@ class MiniPDF:
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         hscroll.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self.canvas.bind("<Button-1>", self._drag_start)
-        self.canvas.bind("<B1-Motion>", self._drag_move)
-        self.canvas.bind("<ButtonRelease-1>", self._drag_end)
+        self.canvas.bind("<Button-1>", self._click_select)
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
 
         # 상태바
@@ -218,76 +216,87 @@ class MiniPDF:
             self.status.config(text=f"폰트 설정: {dialog.result}")
             self._save_config()
 
-    # ── 드래그 선택 ────────────────────────────────────
-    def _drag_start(self, event):
+    # ── 클릭으로 텍스트 블록 선택 ──────────────────────
+    def _click_select(self, event):
         if not self.doc:
             return
-        self._drag_origin = (event.x, event.y)
-        self._selection = None
-        self.canvas.delete("selection")
+        px = (event.x - 10) / self.zoom
+        py = (event.y - 10) / self.zoom
+        page = self.doc[self.current_page]
 
-    def _drag_move(self, event):
-        if not self._drag_origin:
-            return
-        x0, y0 = self._drag_origin
-        x1, y1 = event.x, event.y
+        # 클릭 위치의 텍스트 블록 탐색
+        data = page.get_text("dict")
+        target = None
+        for block in data["blocks"]:
+            if block.get("type") != 0:
+                continue
+            bx0, by0, bx1, by1 = block["bbox"]
+            if bx0 <= px <= bx1 and by0 <= py <= by1:
+                target = block
+                break
+
         self.canvas.delete("selection")
+        if not target:
+            self._selected_pdf_rect = None
+            self.status.config(text="텍스트 블록을 찾지 못했습니다.")
+            return
+
+        # PDF 블록 rect 저장
+        self._selected_pdf_rect = fitz.Rect(target["bbox"])
+
+        # 텍스트 색상 감지 (첫 번째 span 기준)
+        try:
+            color_int = target["lines"][0]["spans"][0].get("color", 0)
+            self._detected_color = (
+                ((color_int >> 16) & 0xFF) / 255,
+                ((color_int >> 8) & 0xFF) / 255,
+                (color_int & 0xFF) / 255,
+            )
+        except Exception:
+            self._detected_color = (0, 0, 0)
+
+        # 캔버스에 블록 경계 하이라이트
+        bx0, by0, bx1, by1 = target["bbox"]
+        cx0 = bx0 * self.zoom + 10
+        cy0 = by0 * self.zoom + 10
+        cx1 = bx1 * self.zoom + 10
+        cy1 = by1 * self.zoom + 10
         self.canvas.create_rectangle(
-            x0, y0, x1, y1,
+            cx0, cy0, cx1, cy1,
             outline="#1a7fd4", width=2,
             fill="#1a7fd4", stipple="gray25",
             tags="selection"
         )
 
-    def _drag_end(self, event):
-        if not self._drag_origin:
-            return
-        x0, y0 = self._drag_origin
-        x1, y1 = event.x, event.y
-        self._drag_origin = None
-
-        # 너무 작은 드래그는 무시
-        if abs(x1 - x0) < 5 and abs(y1 - y0) < 5:
-            self.canvas.delete("selection")
-            self._selection = None
-            return
-
-        self._selection = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
-
-        # 선택 영역 내 텍스트 추출해서 상태바에 미리보기
-        page = self.doc[self.current_page]
-        rect = self._canvas_to_pdf_rect(*self._selection)
-        text = page.get_text("text", clip=rect).strip()
+        # 상태바 미리보기
+        text = "".join(
+            span["text"]
+            for line in target["lines"]
+            for span in line["spans"]
+        ).strip()
         preview = text[:60].replace("\n", " ") + ("…" if len(text) > 60 else "")
-        if preview:
-            self.status.config(text=f"선택됨: \"{preview}\"  →  텍스트 교체 버튼을 눌러주세요.")
-        else:
-            self.status.config(text="선택 영역에 텍스트가 없습니다.")
-
-    def _canvas_to_pdf_rect(self, cx0, cy0, cx1, cy1):
-        def c2p(v): return (v - 10) / self.zoom
-        return fitz.Rect(c2p(cx0), c2p(cy0), c2p(cx1), c2p(cy1))
+        self.status.config(text=f'선택됨: "{preview}"  →  텍스트 교체 버튼을 눌러주세요.')
 
     # ── 텍스트 교체 ────────────────────────────────────
     def replace_text_mode(self):
         if not self.doc:
             messagebox.showwarning("알림", "먼저 PDF를 열어주세요.")
             return
-        if not self._selection:
-            self.status.config(text="먼저 문서에서 교체할 영역을 드래그로 선택하세요.")
+        if not self._selected_pdf_rect:
+            self.status.config(text="먼저 문서에서 교체할 텍스트 블록을 클릭하세요.")
             return
 
         page = self.doc[self.current_page]
-        rect = self._canvas_to_pdf_rect(*self._selection)
+        rect = self._selected_pdf_rect
         orig_text = page.get_text("text", clip=rect).strip()
 
         # 원본 폰트 크기 감지
         detected_size = 11.0
         try:
-            blocks = page.get_text("dict", clip=rect)["blocks"]
             sizes = [
                 span["size"]
-                for b in blocks if b.get("type") == 0
+                for b in page.get_text("dict", clip=rect)["blocks"]
+                if b.get("type") == 0
                 for line in b["lines"]
                 for span in line["spans"]
                 if span["text"].strip()
@@ -297,16 +306,17 @@ class MiniPDF:
         except Exception:
             pass
 
-        dialog = ReplaceDialog(self.root, orig_text, detected_size)
+        dialog = ReplaceDialog(self.root, orig_text, detected_size, self._detected_color)
         self.root.wait_window(dialog.top)
         if not dialog.result:
             return
 
-        new_text, font_size, line_height, align = dialog.result
+        new_text, font_size, line_height, align, text_color = dialog.result
 
         try:
             # redact으로 원본 텍스트 스트림에서 물리적 제거
-            page.add_redact_annot(rect, fill=(1, 1, 1))
+            # fill을 배경에 맞게 투명하게 — 이미지/배경이 있는 경우 보존
+            page.add_redact_annot(rect, fill=None)
             page.apply_redacts(images=fitz.PDF_REDACT_IMAGE_NONE)
 
             if self.selected_font:
@@ -320,7 +330,7 @@ class MiniPDF:
                 new_text,
                 fontsize=font_size,
                 fontname=fontname,
-                color=(0, 0, 0),
+                color=text_color,
                 align=align,
                 lineheight=line_height,
             )
@@ -331,7 +341,7 @@ class MiniPDF:
             messagebox.showerror("텍스트 삽입 오류", str(e))
             return
 
-        self._selection = None
+        self._selected_pdf_rect = None
         self.canvas.delete("selection")
         self.page_images.clear()
         self.render_page()
@@ -426,7 +436,7 @@ class FontPickerDialog:
 class ReplaceDialog:
     ALIGN_OPTIONS = [("왼쪽", 0), ("가운데", 1), ("오른쪽", 2), ("양쪽", 3)]
 
-    def __init__(self, parent, orig_text, detected_size=11.0):
+    def __init__(self, parent, orig_text, detected_size=11.0, detected_color=(0, 0, 0)):
         self.result = None
         self.top = tk.Toplevel(parent)
         self.top.title("텍스트 교체")
@@ -467,10 +477,36 @@ class ReplaceDialog:
                 row=0, column=5 + val, sticky=tk.W
             )
 
+        # 텍스트 색상
+        color_frame = tk.Frame(self.top)
+        color_frame.pack(fill=tk.X, padx=10, pady=(0, 4))
+        tk.Label(color_frame, text="텍스트 색상:").pack(side=tk.LEFT)
+        self._color = detected_color
+        hex_color = "#{:02x}{:02x}{:02x}".format(
+            int(detected_color[0] * 255),
+            int(detected_color[1] * 255),
+            int(detected_color[2] * 255),
+        )
+        self.color_swatch = tk.Label(color_frame, bg=hex_color, width=4, relief=tk.SUNKEN)
+        self.color_swatch.pack(side=tk.LEFT, padx=6)
+        tk.Button(color_frame, text="변경", command=self._pick_color).pack(side=tk.LEFT)
+
         btn_frame = tk.Frame(self.top)
         btn_frame.pack(pady=8)
         tk.Button(btn_frame, text="교체", command=self._ok, width=10).pack(side=tk.LEFT, padx=4)
         tk.Button(btn_frame, text="취소", command=self.top.destroy, width=10).pack(side=tk.LEFT, padx=4)
+
+    def _pick_color(self):
+        hex_init = "#{:02x}{:02x}{:02x}".format(
+            int(self._color[0] * 255),
+            int(self._color[1] * 255),
+            int(self._color[2] * 255),
+        )
+        result = colorchooser.askcolor(color=hex_init, parent=self.top, title="텍스트 색상 선택")
+        if result and result[0]:
+            r, g, b = result[0]
+            self._color = (r / 255, g / 255, b / 255)
+            self.color_swatch.config(bg=result[1])
 
     def _ok(self):
         text = self.new_text.get("1.0", tk.END).strip()
@@ -483,7 +519,7 @@ class ReplaceDialog:
         except ValueError:
             lh = 1.4
         if text:
-            self.result = (text, size, lh, self.align_var.get())
+            self.result = (text, size, lh, self.align_var.get(), self._color)
         self.top.destroy()
 
 
